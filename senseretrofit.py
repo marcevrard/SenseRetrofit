@@ -33,10 +33,10 @@ from scipy.sparse import lil_matrix
 
 
 help_message = '''
-$ python senseretrofit.py -v <vectorsFile> -q <ontologyFile> [-o outputFile] [-n numIters] [-e epsilon] [-h]
+$ python senseretrofit.py -v <emb_in_fpath> -q <onto_fpath> [-o emb_out_fpath] [-n n_iters] [-e epsilon] [-h]
 -v or --vectors to specify path to the word vectors input file (gzip or txt files are acceptable)
 -q or --ontology to specify path to the ontology (gzip or txt files are acceptable)
--o or --output to optionally set path to output word sense vectors file (<vectorsFile>.sense is used by default)
+-o or --output to optionally set path to output word sense vectors file (<emb_in_fpath>.sense is used by default)
 -n or --numiters to optionally set the number of retrofitting iterations (10 is the default)
 -e or --epsilon to optionally set the convergence threshold (0.001 is the default)
 -h or --help (this message is displayed)
@@ -46,46 +46,46 @@ SENSE_SEP = '%'
 VAL_SEP = '#'
 
 
-def readCommandLineInput(argv):
+def read_args(argv):
     ''' Read command line arguments '''
     # specify the possible option switches
-    opts, _ = getopt.getopt(argv[1:], "hv:q:o:n:e:", ["help", "vectors=", "ontology=",
-                                                        "output=", "numiters=", "epsilon="])
+    opts, _ = getopt.getopt(argv[1:], "hv:q:o:n:e:",
+                            ["help", "vectors=", "ontology=", "output=", "numiters=", "epsilon="])
     # default values
-    vectorsFile = None
-    ontologyFile = None
-    outputFile = None
-    numIters = 10
+    emb_in_fpath = None
+    onto_fpath = None
+    emb_out_fpath = None
+    n_iters = 10
     epsilon = 0.001
 
-    setOutput = False
+    set_out_fpath = False
     # option processing
     for option, value in opts:
         if option in ("-h", "--help"):
             print(help_message)
         elif option in ("-v", "--vectors"):
-            vectorsFile = value
+            emb_in_fpath = value
         elif option in ("-q", "--ontology"):
-            ontologyFile = value
+            onto_fpath = value
         elif option in ("-o", "--output"):
-            outputFile = value
-            setOutput = True
+            emb_out_fpath = value
+            set_out_fpath = True
         elif option in ("-n", "--numiters"):
-            numIters = int(value)
+            n_iters = int(value)
         elif option in ("-e", "--epsilon"):
             epsilon = float(value)
         else:
             print(help_message)
 
-    if (vectorsFile == None) or (ontologyFile == None):
+    if (emb_in_fpath is None) or (onto_fpath is None):
         print(help_message)
     else:
-        if not setOutput:
-            outputFile = vectorsFile + '.sense'
-        return (vectorsFile, ontologyFile, outputFile, numIters, epsilon)
+        if not set_out_fpath:
+            emb_out_fpath = emb_in_fpath + '.sense'
+        return (emb_in_fpath, onto_fpath, emb_out_fpath, n_iters, epsilon)
 
 
-def readWordVectors(fpath):
+def read_emb_in(fpath):
     ''' Read all the word vectors from file.'''
     print("Reading vectors from file...")
 
@@ -94,23 +94,23 @@ def readWordVectors(fpath):
     else:
         f_open = open
 
-    wordVectors = {}
-    lineNum = 0
+    wvecs = {}
+    l_idx = 0
     with f_open(fpath) as f:
-        vectorDim = int(f.readline().decode().strip().split()[1])
+        v_dim = int(f.readline().decode().strip().split()[1])
         vectors = np.loadtxt(fpath, dtype=float, comments=None,
-                            skiprows=1, usecols=list(range(1, vectorDim + 1)))
+                             skiprows=1, usecols=list(range(1, v_dim + 1)))
         for line in f:
             word = line.decode().lower().strip().split()[0]
-            wordVectors[word] = vectors[lineNum]
-            lineNum += 1
+            wvecs[word] = vectors[l_idx]
+            l_idx += 1
 
     print("Finished reading vectors.")
 
-    return wordVectors, vectorDim
+    return wvecs, v_dim
 
 
-def writeWordVectors(wordVectors, vectorDim, fpath):
+def write_emb_out(wvecs, v_dim, fpath):
     ''' Write word vectors to file '''
     print("Writing vectors to file...")
 
@@ -120,28 +120,28 @@ def writeWordVectors(wordVectors, vectorDim, fpath):
         f_open = open
 
     with f_open(fpath, 'w') as f:
-        f.write(str(len(wordVectors.keys())) + ' ' + str(vectorDim) + '\n')
-        for word in wordVectors:
-            f.write(word + ' ' + ' '.join(map(str, wordVectors[word])) + '\n')
+        f.write(str(len(wvecs.keys())) + ' ' + str(v_dim) + '\n')
+        for word in wvecs:
+            f.write(word + ' ' + ' '.join(map(str, wvecs[word])) + '\n')
 
     print("Finished writing vectors.")
 
 
-def addToken2Vocab(token, vocab, vocabIndex, wordVectors):
+def add_token2voc(token, vocab, voc_idx, wvecs):
     ''' Add word sense tokens to a vocabulary relevant to the input vectors.'''
     # check if this sense has a corresponding word vector
-    if token.split(SENSE_SEP)[0] not in wordVectors:
-        return vocabIndex
+    if token.split(SENSE_SEP)[0] not in wvecs:
+        return voc_idx
 
     # check if the sense isn't already in the vocabulary
     if token not in vocab:
-        vocab[token] = vocabIndex
-        return vocabIndex + 1
+        vocab[token] = voc_idx
+        return voc_idx + 1
 
-    return vocabIndex
+    return voc_idx
 
 
-def readOntology(fpath, wordVectors):
+def read_ontology(fpath, wvecs):
     ''' Read the subset of the ontology relevant to the input vectors.'''
 
     print("Reading ontology from file...")
@@ -152,7 +152,7 @@ def readOntology(fpath, wordVectors):
 
     # index all the word senses
     vocab = {}
-    vocabIndex = 0
+    voc_idx = 0
 
     with f_open(fpath) as f:
         for line in f:
@@ -160,26 +160,26 @@ def readOntology(fpath, wordVectors):
             for token in line:
                 # print('**', token)
                 token = token.split(VAL_SEP)[0]
-                vocabIndex = addToken2Vocab(token, vocab, vocabIndex, wordVectors)
-    vocabIndex += 1
+                voc_idx = add_token2voc(token, vocab, voc_idx, wvecs)
+    voc_idx += 1
 
     # create the sparse adjacency matrix of weights between senses
-    adjacencyMatrix = lil_matrix((vocabIndex, vocabIndex))
+    adjacency_mtx = lil_matrix((voc_idx, voc_idx))
     with f_open(fpath) as f:
         for line in f:
             line = line.decode().strip().split()
-            for i in range(len(line)):
-                token = line[i].split(VAL_SEP)
+            for idx, el in enumerate(line):
+                token = el.split(VAL_SEP)
                 if token[0] in vocab:
                     # find the row index
-                    if i == 0:
+                    if idx == 0:
                         row = vocab[token[0]]
                     # find the col index of the neighbor and set its weight
                     col = vocab[token[0]]
                     val = float(token[1])
-                    adjacencyMatrix[row, col] = val
+                    adjacency_mtx[row, col] = val
                 else:
-                    if i == 0:
+                    if idx == 0:
                         break
                     continue
 
@@ -187,93 +187,93 @@ def readOntology(fpath, wordVectors):
 
     # invert the vocab before returning
     vocab = {vocab[k]: k for k in vocab}
-    return vocab, adjacencyMatrix.tocoo()
+    return vocab, adjacency_mtx.tocoo()
 
 
-def maxVectorDiff(newVecs, oldVecs):
+def max_vec_diff(new_vecs, old_vecs):
     ''' Return the maximum differential between old and new vectors
-to check for convergence.'''
-    maxDiff = 0.0
-    for k in newVecs:
-        diff = np.linalg.norm(newVecs[k] - oldVecs[k])
-        if diff > maxDiff:
-            maxDiff = diff
-    return maxDiff
+    to check for convergence.'''
+    max_diff = 0.0
+    for k in new_vecs:
+        diff = np.linalg.norm(new_vecs[k] - old_vecs[k])
+        if diff > max_diff:
+            max_diff = diff
+    return max_diff
 
 
-def retrofit(wordVectors, vectorDim, senseVocab, ontologyAdjacency, numIters, epsilon):
+def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, epsilon):
     ''' Run the retrofitting procedure.'''
     print("Starting the retrofitting procedure...")
 
     # get the word types in the ontology
-    ontologyWords = set([senseVocab[k].split(SENSE_SEP)[0]
-                         for k in senseVocab])
+    onto_words = set([sense_voc[k].split(SENSE_SEP)[0]
+                      for k in sense_voc])
     # initialize sense vectors to sense agnostic counterparts
-    newSenseVectors = {senseVocab[k]: wordVectors[senseVocab[k].split(SENSE_SEP)[0]]
-                       for k in senseVocab}
+    new_sense_vecs = {sense_voc[k]: wvecs[sense_voc[k].split(SENSE_SEP)[0]]
+                      for k in sense_voc}
     # create dummy sense vectors for words that aren't in the ontology (these
     # won't be updated)
-    newSenseVectors.update({k + SENSE_SEP + '0:00:00::': wordVectors[k] for k in wordVectors
-                            if k not in ontologyWords})
+    new_sense_vecs.update({k + SENSE_SEP + '0:00:00::': wvecs[k] for k in wvecs
+                           if k not in onto_words})
 
     # create a copy of the sense vectors to check for convergence
-    oldSenseVectors = deepcopy(newSenseVectors)
+    old_sense_vecs = deepcopy(new_sense_vecs)
 
     # run for a maximum number of iterations
-    for it in range(numIters):
-        newVector = None
+    for itr in range(n_iters):
+        new_vec = None
         normalizer = None
-        prevRow = None
-        print('Running retrofitting iter ' + str(it + 1) + '... ')
+        prev_row = None
+        print("Running retrofitting iter {:2d}...".format(itr + 1), end=' ')
         # loop through all the non-zero weights in the adjacency matrix
-        for row, col, val in zip(ontologyAdjacency.row, ontologyAdjacency.col, ontologyAdjacency.data):
+        for row, col, val in zip(onto_adjacency.row, onto_adjacency.col, onto_adjacency.data):
             # a new sense has started
-            if row != prevRow:
-                if prevRow:
-                    newSenseVectors[senseVocab[prevRow]] = newVector / normalizer
+            if row != prev_row:
+                if prev_row:
+                    new_sense_vecs[sense_voc[prev_row]] = new_vec / normalizer
 
-                newVector = np.zeros(vectorDim, dtype=float)
+                new_vec = np.zeros(v_dim, dtype=float)
                 normalizer = 0.0
-                prevRow = row
+                prev_row = row
 
             # add the sense agnostic vector
             if row == col:
-                newVector += val * wordVectors[senseVocab[row].split(SENSE_SEP)[0]]
+                new_vec += val * wvecs[sense_voc[row].split(SENSE_SEP)[0]]
             # add a neighboring vector
             else:
-                newVector += val * newSenseVectors[senseVocab[col]]
+                new_vec += val * new_sense_vecs[sense_voc[col]]
             normalizer += val
 
-        diffScore = maxVectorDiff(newSenseVectors, oldSenseVectors)
-        print('Max vector differential is ' + str(diffScore) + '\n')
-        if diffScore <= epsilon:
+        diff_score = max_vec_diff(new_sense_vecs, old_sense_vecs)
+        print("Max vector differential is {:7.4f}".format(diff_score))
+        if diff_score <= epsilon:
             break
-        oldSenseVectors = deepcopy(newSenseVectors)
+        old_sense_vecs = deepcopy(new_sense_vecs)
 
     print("Finished running retrofitting.")
 
-    return newSenseVectors
+    return new_sense_vecs
 
 
 if __name__ == "__main__":
     # parse command line input
-    commandParse = readCommandLineInput(sys.argv)
+    command_parse = read_args(sys.argv)
     # failed command line input
-    if commandParse == 2:
+    if command_parse == 2:
         sys.exit(2)
 
     # try opening the specified files
     # try:
-    vectors, vectorDim = readWordVectors(commandParse[0])
-    senseVocab, ontologyAdjacency = readOntology(commandParse[1], vectors)
-    numIters = commandParse[3]
-    epsilon = commandParse[4]
+    vectors, v_dim = read_emb_in(command_parse[0])
+    sense_voc, onto_adjacency = read_ontology(command_parse[1], vectors)
+    n_iters = command_parse[3]
+    epsilon = command_parse[4]
     # except:
     #     print("ERROR opening files. One of the paths or formats of the specified files was incorrect.")
     #     sys.exit(2)
 
     # run retrofitting and write to output file
-    writeWordVectors(retrofit(vectors, vectorDim, senseVocab, ontologyAdjacency, numIters, epsilon),
-                     vectorDim, commandParse[2])
+    write_emb_out(retrofit(vectors, v_dim, sense_voc, onto_adjacency, n_iters, epsilon),
+                  v_dim, command_parse[2])
 
     print("All done!")
