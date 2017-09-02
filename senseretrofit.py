@@ -23,66 +23,17 @@ Example
 ```````
     ./senseretrofit.py -v sample_data/sample_vec.txt.gz -q sample_data/sample_onto.txt.gz
 '''
-import getopt
+import argparse
 import gzip
-import sys
+import os
 from copy import deepcopy
 
 import numpy as np
 from scipy.sparse import lil_matrix
 
 
-help_message = '''
-$ python senseretrofit.py -v <emb_in_fpath> -q <onto_fpath> [-o emb_out_fpath] [-n n_iters] [-e epsilon] [-h]
--v or --vectors to specify path to the word vectors input file (gzip or txt files are acceptable)
--q or --ontology to specify path to the ontology (gzip or txt files are acceptable)
--o or --output to optionally set path to output word sense vectors file (<emb_in_fpath>.sense is used by default)
--n or --numiters to optionally set the number of retrofitting iterations (10 is the default)
--e or --epsilon to optionally set the convergence threshold (0.001 is the default)
--h or --help (this message is displayed)
-'''
-
 SENSE_SEP = '%'
 VAL_SEP = '#'
-
-
-def read_args(argv):
-    ''' Read command line arguments '''
-    # specify the possible option switches
-    opts, _ = getopt.getopt(argv[1:], "hv:q:o:n:e:",
-                            ["help", "vectors=", "ontology=", "output=", "numiters=", "epsilon="])
-    # default values
-    emb_in_fpath = None
-    onto_fpath = None
-    emb_out_fpath = None
-    n_iters = 10
-    epsilon = 0.001
-
-    set_out_fpath = False
-    # option processing
-    for option, value in opts:
-        if option in ("-h", "--help"):
-            print(help_message)
-        elif option in ("-v", "--vectors"):
-            emb_in_fpath = value
-        elif option in ("-q", "--ontology"):
-            onto_fpath = value
-        elif option in ("-o", "--output"):
-            emb_out_fpath = value
-            set_out_fpath = True
-        elif option in ("-n", "--numiters"):
-            n_iters = int(value)
-        elif option in ("-e", "--epsilon"):
-            epsilon = float(value)
-        else:
-            print(help_message)
-
-    if (emb_in_fpath is None) or (onto_fpath is None):
-        print(help_message)
-    else:
-        if not set_out_fpath:
-            emb_out_fpath = emb_in_fpath + '.sense'
-        return (emb_in_fpath, onto_fpath, emb_out_fpath, n_iters, epsilon)
 
 
 def read_emb_in(fpath):
@@ -201,7 +152,7 @@ def max_vec_diff(new_vecs, old_vecs):
     return max_diff
 
 
-def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, epsilon):
+def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, threshold):
     ''' Run the retrofitting procedure.'''
     print("Starting the retrofitting procedure...")
 
@@ -246,7 +197,7 @@ def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, epsilon):
 
         diff_score = max_vec_diff(new_sense_vecs, old_sense_vecs)
         print("Max vector differential is {:7.4f}".format(diff_score))
-        if diff_score <= epsilon:
+        if diff_score <= threshold:
             break
         old_sense_vecs = deepcopy(new_sense_vecs)
 
@@ -255,25 +206,43 @@ def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, epsilon):
     return new_sense_vecs
 
 
-if __name__ == "__main__":
-    # parse command line input
-    command_parse = read_args(sys.argv)
-    # failed command line input
-    if command_parse == 2:
-        sys.exit(2)
+def parse_args():
 
-    # try opening the specified files
-    # try:
-    vectors, v_dim = read_emb_in(command_parse[0])
-    sense_voc, onto_adjacency = read_ontology(command_parse[1], vectors)
-    n_iters = command_parse[3]
-    epsilon = command_parse[4]
-    # except:
-    #     print("ERROR opening files. One of the paths or formats of the specified files was incorrect.")
-    #     sys.exit(2)
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('-i', '--in-fpath', required=True,
+                        help="Embedding input file path (gz, txt or npy file formats).")
+    parser.add_argument('-o', '--out-fpath',
+                        help="Embedding output file path (optional, default: <in_fpath>_sense).")
+    parser.add_argument('-q', '--onto-fpath',
+                        help="Ontology input file path (gz or txt file formats).")
+    parser.add_argument('-n', '--n_iters', type=int, default=10,
+                        help="Number of iterations.")
+    parser.add_argument('-t', '--threshold', type=float, default=0.001,
+                        help="Convergence threshold.")
+    parser.add_argument('-f', '--format', choices=['txt', 'npy'], default='npy',
+                        help="Choice of output format.")
+
+    return parser.parse_args()
+
+
+def main(argp):
+    wvecs, v_dim = read_emb_in(argp.in_fpath)
+    sense_voc, onto_adjacency = read_ontology(argp.onto_fpath, wvecs)
+
+    if argp.out_fpath is None:
+        out_fpath = os.path.join('output',
+                                 os.path.splitext(os.path.basename(argp.in_fpath))[0])
+    else:
+        out_fpath = argp.out_fpath
 
     # run retrofitting and write to output file
-    write_emb_out(retrofit(vectors, v_dim, sense_voc, onto_adjacency, n_iters, epsilon),
-                  v_dim, command_parse[2])
+    new_sense_vecs = retrofit(wvecs, v_dim, sense_voc, onto_adjacency,
+                              argp.n_iters, argp.threshold)
+    write_emb_out(new_sense_vecs, v_dim, out_fpath)
 
     print("All done!")
+
+
+if __name__ == "__main__":
+    main(parse_args())
