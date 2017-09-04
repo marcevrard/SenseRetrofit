@@ -21,7 +21,7 @@ http://www.apache.org/licenses/LICENSE-2.0
 
 Example
 ```````
-    ./senseretrofit.py -v sample_data/sample_vec.txt.gz -q sample_data/sample_onto.txt.gz
+    ./senseretrofit.py -i sample_data/sample_vec.npy -q sample_data/sample_onto.txt.gz
 '''
 import argparse
 import gzip
@@ -29,70 +29,45 @@ import os
 from copy import deepcopy
 
 import numpy as np
-from scipy.sparse import lil_matrix
+from scipy import sparse
 
+import embedding_tools as emb
 
 SENSE_SEP = '%'
 VAL_SEP = '#'
 
 
-def read_emb_in(fpath):
-    ''' Read all the word vectors from file.'''
-    print("Reading vectors from file...")
-
-    if fpath.endswith('.gz'):
-        f_open = gzip.open
-    else:
-        f_open = open
-
-    wvecs = {}
-    l_idx = 0
-    with f_open(fpath) as f:
-        v_dim = int(f.readline().decode().strip().split()[1])
-        vectors = np.loadtxt(fpath, dtype=float, comments=None,
-                             skiprows=1, usecols=list(range(1, v_dim + 1)))
-        for line in f:
-            word = line.decode().lower().strip().split()[0]
-            wvecs[word] = vectors[l_idx]
-            l_idx += 1
-
-    print("Finished reading vectors.")
-
-    return wvecs, v_dim
+def onto2word(onto_token):
+    return onto_token.split(SENSE_SEP)[0]
 
 
-def write_emb_out(wvecs, v_dim, fpath):
-    ''' Write word vectors to file '''
-    print("Writing vectors to file...")
-
-    if fpath.endswith('.gz'):
-        f_open = gzip.open
-    else:
-        f_open = open
-
-    with f_open(fpath, 'w') as f:
-        f.write(str(len(wvecs.keys())) + ' ' + str(v_dim) + '\n')
-        for word in wvecs:
-            f.write(word + ' ' + ' '.join(map(str, wvecs[word])) + '\n')
-
-    print("Finished writing vectors.")
+def onto2sense(onto_token):
+    return onto_token.split(VAL_SEP)[0]
 
 
-def add_token2voc(token, vocab, voc_idx, wvecs):
+def wvecs2embeds(wvecs):
+    id2token, embeds = [], []
+    for token in sorted(wvecs.keys()):
+        id2token.append(token)
+        embeds.append(wvecs[token])
+    return id2token, np.array(embeds, dtype=np.float32)  # pylint: disable=no-member
+
+
+def add_token2voc(token, onto_sense2id, onto_idx, emb_voc):
     ''' Add word sense tokens to a vocabulary relevant to the input vectors.'''
     # check if this sense has a corresponding word vector
-    if token.split(SENSE_SEP)[0] not in wvecs:
-        return voc_idx
+    if onto2word(token) not in emb_voc:
+        return onto_idx
 
     # check if the sense isn't already in the vocabulary
-    if token not in vocab:
-        vocab[token] = voc_idx
-        return voc_idx + 1
+    if token not in onto_sense2id:
+        onto_sense2id[token] = onto_idx
+        return onto_idx + 1
 
-    return voc_idx
+    return onto_idx
 
 
-def read_ontology(fpath, wvecs):
+def read_ontology(fpath, id2word):
     ''' Read the subset of the ontology relevant to the input vectors.'''
 
     print("Reading ontology from file...")
@@ -101,34 +76,33 @@ def read_ontology(fpath, wvecs):
     else:
         f_open = open
 
-    # index all the word senses
-    vocab = {}
-    voc_idx = 0
+    emb_voc = set(id2word)
+    # Index all the word senses
+    onto_sense2id = {}
+    onto_idx = 0
 
     with f_open(fpath) as f:
         for line in f:
             line = line.decode().strip().split()
             for token in line:
-                # print('**', token)
-                token = token.split(VAL_SEP)[0]
-                voc_idx = add_token2voc(token, vocab, voc_idx, wvecs)
-    voc_idx += 1
+                sense_token = onto2sense(token)
+                onto_idx = add_token2voc(sense_token, onto_sense2id, onto_idx, emb_voc)
+    onto_idx += 1
 
-    # create the sparse adjacency matrix of weights between senses
-    adjacency_mtx = lil_matrix((voc_idx, voc_idx))
+    # Create the sparse adjacency matrix of weights between senses
+    adjacency_mtx = sparse.lil_matrix((onto_idx, onto_idx))
     with f_open(fpath) as f:
         for line in f:
             line = line.decode().strip().split()
-            for idx, el in enumerate(line):
-                token = el.split(VAL_SEP)
-                if token[0] in vocab:
+            for idx, token in enumerate(line):
+                sense_token, val = token.split(VAL_SEP)
+                if sense_token in onto_sense2id:
                     # find the row index
                     if idx == 0:
-                        row = vocab[token[0]]
+                        row = onto_sense2id[sense_token]
                     # find the col index of the neighbor and set its weight
-                    col = vocab[token[0]]
-                    val = float(token[1])
-                    adjacency_mtx[row, col] = val
+                    col = onto_sense2id[sense_token]
+                    adjacency_mtx[row, col] = float(val)
                 else:
                     if idx == 0:
                         break
@@ -136,9 +110,10 @@ def read_ontology(fpath, wvecs):
 
     print("Finished reading ontology.")
 
-    # invert the vocab before returning
-    vocab = {vocab[k]: k for k in vocab}
-    return vocab, adjacency_mtx.tocoo()
+    id2onto_sense = [sense_token for sense_token, _idx
+                     in sorted(onto_sense2id.items(), key=lambda x: x[1])]
+
+    return id2onto_sense, adjacency_mtx.tocoo()
 
 
 def max_vec_diff(new_vecs, old_vecs):
@@ -152,47 +127,45 @@ def max_vec_diff(new_vecs, old_vecs):
     return max_diff
 
 
-def retrofit(wvecs, v_dim, sense_voc, onto_adjacency, n_iters, threshold):
+def retrofit(word2id, embeds, id2onto_sense, onto_adjacency, n_iters, threshold):
     ''' Run the retrofitting procedure.'''
     print("Starting the retrofitting procedure...")
 
-    # get the word types in the ontology
-    onto_words = set([sense_voc[k].split(SENSE_SEP)[0]
-                      for k in sense_voc])
-    # initialize sense vectors to sense agnostic counterparts
-    new_sense_vecs = {sense_voc[k]: wvecs[sense_voc[k].split(SENSE_SEP)[0]]
-                      for k in sense_voc}
-    # create dummy sense vectors for words that aren't in the ontology (these
-    # won't be updated)
-    new_sense_vecs.update({k + SENSE_SEP + '0:00:00::': wvecs[k] for k in wvecs
-                           if k not in onto_words})
+    # Get the word types in the ontology
+    onto_words = set([onto2word(token) for token in id2onto_sense])
+    # Initialize sense vectors to sense agnostic counterparts
+    new_sense_vecs = {token: embeds[word2id[onto2word(token)]]
+                      for token in id2onto_sense}
+    # Create dummy sense vectors for words that aren't in the ontology (these won't be updated)
+    new_sense_vecs.update({'{}{}0:00:00::'.format(word, SENSE_SEP): embeds[word2id[word]]
+                           for word in word2id if word not in onto_words})
 
-    # create a copy of the sense vectors to check for convergence
+    # Create a copy of the sense vectors to check for convergence
     old_sense_vecs = deepcopy(new_sense_vecs)
 
-    # run for a maximum number of iterations
+    # Run for a maximum number of iterations
     for itr in range(n_iters):
         new_vec = None
         normalizer = None
         prev_row = None
         print("Running retrofitting iter {:2d}...".format(itr + 1), end=' ')
-        # loop through all the non-zero weights in the adjacency matrix
+        # Loop through all the non-zero weights in the adjacency matrix
         for row, col, val in zip(onto_adjacency.row, onto_adjacency.col, onto_adjacency.data):
-            # a new sense has started
-            if row != prev_row:
+            if row != prev_row:  # New sense
                 if prev_row:
-                    new_sense_vecs[sense_voc[prev_row]] = new_vec / normalizer
+                    new_sense_vecs[id2onto_sense[prev_row]] = new_vec / normalizer
 
-                new_vec = np.zeros(v_dim, dtype=float)
+                # Reinitialize vars
+                new_vec = np.zeros(embeds.shape[1], dtype=float)
                 normalizer = 0.0
                 prev_row = row
 
-            # add the sense agnostic vector
-            if row == col:
-                new_vec += val * wvecs[sense_voc[row].split(SENSE_SEP)[0]]
-            # add a neighboring vector
-            else:
-                new_vec += val * new_sense_vecs[sense_voc[col]]
+            if row == col:  # Add the sense agnostic vector
+                word = onto2word(id2onto_sense[row])
+                new_vec += val * embeds[word2id[word]]
+            else:  # Add a neighboring vector
+                new_vec += val * new_sense_vecs[id2onto_sense[col]]
+
             normalizer += val
 
         diff_score = max_vec_diff(new_sense_vecs, old_sense_vecs)
@@ -227,19 +200,23 @@ def parse_args():
 
 
 def main(argp):
-    wvecs, v_dim = read_emb_in(argp.in_fpath)
-    sense_voc, onto_adjacency = read_ontology(argp.onto_fpath, wvecs)
+    id2word, embeds = emb.load_embeds_np(argp.in_fpath)
+    id2onto_sense, onto_adjacency = read_ontology(argp.onto_fpath, id2word)
+
+    word2id = {word: idx for idx, word in enumerate(id2word)}
+
 
     if argp.out_fpath is None:
         out_fpath = os.path.join('output',
-                                 os.path.splitext(os.path.basename(argp.in_fpath))[0])
+                                 os.path.splitext(os.path.basename(argp.in_fpath))[0] + '_sense')
     else:
         out_fpath = argp.out_fpath
 
-    # run retrofitting and write to output file
-    new_sense_vecs = retrofit(wvecs, v_dim, sense_voc, onto_adjacency,
+    # Run retrofitting and write to output file
+    new_sense_vecs = retrofit(word2id, embeds, id2onto_sense, onto_adjacency,
                               argp.n_iters, argp.threshold)
-    write_emb_out(new_sense_vecs, v_dim, out_fpath)
+
+    emb.save_embeds_np(*wvecs2embeds(new_sense_vecs), out_fpath)
 
     print("All done!")
 
