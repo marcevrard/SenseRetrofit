@@ -218,7 +218,7 @@ def main(argp):
 
     emb.save_embeds_np(*wvecs2embeds(new_sense_vecs), out_fpath)
 
-    print("All done!")
+    print("Done and saved in:", out_fpath)
 
 
 if __name__ == "__main__":
